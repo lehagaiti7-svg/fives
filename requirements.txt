@@ -1,0 +1,6 @@
+aiogram==3.*
+playwright
+python-dotenv==1.0.0
+fastapi==0.109.0
+uvicorn[standard]==0.25.0
+python-multipart
