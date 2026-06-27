@@ -1077,33 +1077,14 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
                 break
             await asyncio.sleep(0.5)  # ждём подгрузку виртуализированных сообщений
 
-        # Парсим БЕЗ переоткрытия чата (иначе скролл сбросится)
+        # Парсим БЕЗ переоткрытия чата и БЕЗ возврата вниз — чтобы позиция прокрутки
+        # сохранялась и следующий клик «Загрузить старее» уходил ещё глубже.
+        # (Чтобы сбросить и освободить память — достаточно обновить чат через ⟳.)
         try:
-            result = await parse_messages_in_dom(page)
+            return await parse_messages_in_dom(page)
         except Exception as e:
             log.warning(f"[{account}] load_older parse error: {e}")
-            result = {"items": [], "total_found": 0}
-
-        # Возвращаем ленту вниз — чтобы MAX выгрузил подгруженные сообщения из DOM
-        # и не копилась память (на маленьком инстансе это спасает от OOM-краша).
-        try:
-            await page.evaluate("""() => {
-                const wrap = document.querySelector('[class*="messageWrapper"]');
-                let c = null;
-                if (wrap) {
-                    let p = wrap.parentElement;
-                    while (p && p !== document.body) {
-                        const oy = getComputedStyle(p).overflowY;
-                        if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight + 20) { c = p; break; }
-                        p = p.parentElement;
-                    }
-                }
-                if (c) c.scrollTop = c.scrollHeight;
-            }""")
-        except Exception:
-            pass
-
-        return result
+            return {"items": [], "total_found": 0}
     except HTTPException:
         raise
     except Exception as e:
