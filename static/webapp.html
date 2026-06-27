@@ -1956,9 +1956,7 @@ function renderMessages(items) {
     let reactionsHtml = '';
     if (m.reactions && m.reactions.length) {
       reactionsHtml = '<div class="msg-reactions">' + m.reactions.map(r => {
-        const face = r.emoji_img
-          ? `<img class="reaction-emoji" src="${r.emoji_img}" alt="">`
-          : escapeHtmlInline(r.emoji || '·');
+        const face = escapeHtmlInline(r.emoji || '👍');
         return `<div class="reaction-chip ${r.active ? 'active' : ''}">${face}${r.count ? ` <span class="reaction-count">${escapeHtmlInline(String(r.count))}</span>` : ''}</div>`;
       }).join('') + '</div>';
     }
