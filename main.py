@@ -354,34 +354,71 @@ async def parse_messages_in_dom(page) -> dict:
     return result or {"items": []}
 
 
+# JS: найти чат по имени среди ОТРИСОВАННЫХ элементов и кликнуть.
+# Имя берём из заголовка .title (точная вёрстка MAX). Возвращает 'ok'|'scroll'|'no-container'.
+_CLICK_CHAT_JS = """(name) => {
+    const container = document.querySelector('.scrollListContent, [class*="scrollListContent"]');
+    if (!container) return 'no-container';
+    const items = container.querySelectorAll(':scope > .item, :scope > [class*="item"]');
+    const getName = (el) => {
+        const titleEl = el.querySelector('[class*="title"]');
+        let nm = titleEl ? (titleEl.innerText || '').trim() : '';
+        if (!nm) { const ne = el.querySelector('[class*="name"]'); if (ne) nm = (ne.innerText || '').trim(); }
+        return nm;
+    };
+    // 1) точное совпадение, 2) начинается с имени (на случай хвостов)
+    for (const el of items) {
+        if (getName(el) === name) {
+            const btn = el.querySelector('button, [role="button"], [class*="cell"]') || el;
+            btn.click();
+            return 'ok';
+        }
+    }
+    for (const el of items) {
+        const nm = getName(el);
+        if (nm && (nm.startsWith(name) || name.startsWith(nm))) {
+            const btn = el.querySelector('button, [role="button"], [class*="cell"]') || el;
+            btn.click();
+            return 'ok';
+        }
+    }
+    // не нашли среди видимых — проматываем список вниз (виртуализация)
+    const sc = document.querySelector('[class*="scrollListScrollable"]');
+    if (sc) sc.scrollTop = Math.min(sc.scrollHeight, sc.scrollTop + sc.clientHeight - 60);
+    return 'scroll';
+}"""
+
+
+async def find_and_click_chat(page, chat_name: str) -> bool:
+    """Находит чат по имени в виртуализированном списке, при необходимости прокручивая его."""
+    # к началу списка
+    try:
+        await page.evaluate("""() => {
+            const c = document.querySelector('[class*="scrollListScrollable"]');
+            if (c) c.scrollTop = 0;
+        }""")
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+
+    for _ in range(20):
+        res = await page.evaluate(_CLICK_CHAT_JS, chat_name)
+        if res == 'ok':
+            return True
+        if res == 'no-container':
+            return False
+        await asyncio.sleep(0.35)  # ждём отрисовку следующих элементов после прокрутки
+    return False
+
+
 async def open_chat_and_fetch_messages(account: str, chat_name: str) -> dict:
-    """
-    Кликает на чат с указанным именем в боковой панели MAX и парсит сообщения.
-    """
+    """Открывает чат с указанным именем и парсит сообщения."""
     if account not in sessions:
         raise HTTPException(status_code=400, detail="Аккаунт не активен")
     page: Page = sessions[account]["page"]
 
     try:
-        # Кликаем на чат с нужным именем (поиск по тексту внутри .item)
-        clicked = await page.evaluate("""(name) => {
-            const container = document.querySelector('.scrollListContent, [class*="scrollListContent"]');
-            if (!container) return false;
-            const items = container.querySelectorAll(':scope > .item, :scope > [class*="item "], :scope > [class^="item"]');
-            for (const el of items) {
-                const allText = (el.innerText || '').trim();
-                const firstLine = allText.split(String.fromCharCode(10))[0];
-                if (firstLine === name) {
-                    // Кликаем по нажимаемому элементу внутри
-                    const btn = el.querySelector('button, [role="button"], .cell') || el;
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }""", chat_name)
-
-        if not clicked:
+        if not await find_and_click_chat(page, chat_name):
             raise HTTPException(status_code=404, detail=f"Чат '{chat_name}' не найден в списке")
 
         # Ждём загрузки сообщений
@@ -410,54 +447,51 @@ async def fetch_chats(account: str) -> list[dict]:
             const container = document.querySelector('.scrollListContent, [class*="scrollListContent"]');
             if (!container) return [];
 
-            const items = container.querySelectorAll(':scope > .item, :scope > [class*="item "], :scope > [class^="item"]');
+            const items = container.querySelectorAll(':scope > .item, :scope > [class*="item"]');
             const result = [];
             const seen = new Set();
 
             items.forEach(el => {
+              try {
+                // ИМЯ — строго из заголовка .title (реальная вёрстка MAX)
                 let name = '';
-                const nameCandidates = el.querySelectorAll('[class*="name"], [class*="title"], [class*="Name"], [class*="Title"]');
-                for (const c of nameCandidates) {
-                    const t = (c.innerText || '').trim();
-                    if (t && t.length < 100) { name = t; break; }
-                }
-
-                let lastMsg = '';
-                const msgCandidates = el.querySelectorAll('[class*="message"], [class*="preview"], [class*="last"], [class*="text"]');
-                for (const c of msgCandidates) {
-                    const t = (c.innerText || '').trim();
-                    if (t && t !== name) { lastMsg = t; break; }
-                }
-
+                const titleEl = el.querySelector('[class*="title"]');
+                if (titleEl) name = (titleEl.innerText || '').trim();
                 if (!name) {
-                    const allText = (el.innerText || '').trim();
-                    const firstLine = allText.split(String.fromCharCode(10))[0];
-                    if (firstLine && firstLine.length < 100) name = firstLine;
+                    const ne = el.querySelector('[class*="name"]');
+                    if (ne) name = (ne.innerText || '').trim();
+                }
+                if (!name || name.length > 100) return;
+
+                // ПРЕВЬЮ последнего сообщения — span.text вне заголовка и меты
+                let lastMsg = '';
+                const textEls = el.querySelectorAll('[class*="text"]');
+                for (const t of textEls) {
+                    if (titleEl && titleEl.contains(t)) continue;
+                    if (t.closest('[class*="meta"]')) continue;
+                    const v = (t.innerText || '').trim();
+                    if (v && v !== name) { lastMsg = v; break; }
                 }
 
-                // АВАТАРКА — ищем img внутри элемента
+                // АВАТАР — реальная картинка (img.avatarImage, src i.oneme.ru)
                 let avatar = '';
-                const imgEl = el.querySelector('img[class*="avatar"], [class*="avatar"] img, img[class*="Image"]');
-                if (imgEl && imgEl.src && imgEl.src.startsWith('http')) {
-                    avatar = imgEl.src;
-                }
+                const imgEl = el.querySelector('img[class*="avatarImage"], img[class*="avatar"], [class*="avatar"] img');
+                if (imgEl && imgEl.src && imgEl.src.startsWith('http')) avatar = imgEl.src;
 
-                // ВРЕМЯ последнего сообщения
+                // ВРЕМЯ — из меты .time
                 let time = '';
-                const timeCandidates = el.querySelectorAll('[class*="time"], [class*="date"], [class*="Time"], [class*="Date"]');
-                for (const c of timeCandidates) {
-                    const t = (c.innerText || '').trim();
-                    if (t && t.length < 20) { time = t; break; }
-                }
+                const timeEl = el.querySelector('[class*="time"]');
+                if (timeEl) time = (timeEl.innerText || '').trim();
 
+                // НЕПРОЧИТАННЫЕ
                 let unread = '';
-                const badgeEl = el.querySelector('[class*="unread"], [class*="badge"], [class*="counter"], [class*="Counter"]');
+                const badgeEl = el.querySelector('[class*="unread"], [class*="counter"], [class*="badge"]');
                 if (badgeEl) {
                     const t = (badgeEl.innerText || '').trim();
                     if (/^[0-9]+$/.test(t)) unread = t;
                 }
 
-                if (!name || seen.has(name)) return;
+                if (seen.has(name)) return;
                 seen.add(name);
 
                 result.push({
@@ -467,6 +501,7 @@ async def fetch_chats(account: str) -> list[dict]:
                     avatar: avatar,
                     time: time,
                 });
+              } catch (e) {}
             });
             return result;
         }""")
@@ -866,24 +901,8 @@ async def api_chat_profile(account: str, chat_name: str, user: dict = None):
     page: Page = sessions[account]["page"]
 
     try:
-        # Сначала убеждаемся что чат открыт
-        clicked = await page.evaluate("""(name) => {
-            const container = document.querySelector('.scrollListContent, [class*="scrollListContent"]');
-            if (!container) return false;
-            const items = container.querySelectorAll(':scope > .item, :scope > [class*="item "], :scope > [class^="item"]');
-            for (const el of items) {
-                const allText = (el.innerText || '').trim();
-                const firstLine = allText.split(String.fromCharCode(10))[0];
-                if (firstLine === name) {
-                    const btn = el.querySelector('button, [role="button"], .cell') || el;
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }""", chat_name)
-
-        if not clicked:
+        # Сначала убеждаемся что чат открыт (надёжный поиск с прокруткой)
+        if not await find_and_click_chat(page, chat_name):
             raise HTTPException(status_code=404, detail=f"Чат '{chat_name}' не найден")
 
         await asyncio.sleep(1.5)
@@ -959,24 +978,8 @@ async def api_send_message(account: str, chat_name: str, request: Request, user:
 
     page: Page = sessions[account]["page"]
     try:
-        # Открываем нужный чат
-        clicked = await page.evaluate("""(name) => {
-            const container = document.querySelector('.scrollListContent, [class*="scrollListContent"]');
-            if (!container) return false;
-            const items = container.querySelectorAll(':scope > .item, :scope > [class*="item "], :scope > [class^="item"]');
-            for (const el of items) {
-                const allText = (el.innerText || '').trim();
-                const firstLine = allText.split(String.fromCharCode(10))[0];
-                if (firstLine === name) {
-                    const btn = el.querySelector('button, [role="button"], .cell') || el;
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }""", chat_name)
-
-        if not clicked:
+        # Открываем нужный чат (надёжный поиск с прокруткой)
+        if not await find_and_click_chat(page, chat_name):
             raise HTTPException(status_code=404, detail=f"Чат '{chat_name}' не найден")
 
         await asyncio.sleep(1.2)
