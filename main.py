@@ -216,6 +216,7 @@ MESSAGES_PARSER_JS = """() => {
             const items = [];
 
             allNodes.forEach(node => {
+              try {
                 const cls = typeof node.className === 'string' ? node.className : '';
 
                 // Разделитель даты
@@ -338,9 +339,12 @@ MESSAGES_PARSER_JS = """() => {
                     voice_duration: voiceDuration,
                     media: mediaUrls,
                 });
+              } catch (e) { /* одно битое сообщение не должно ронять весь разбор */ }
             });
 
-            return { items: items, total_found: items.length };
+            // Ограничиваем размер ответа (последние 80 элементов) — чтобы не раздувать payload
+            const trimmed = items.length > 80 ? items.slice(items.length - 80) : items;
+            return { items: trimmed, total_found: items.length };
         }"""
 
 
@@ -1025,35 +1029,44 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
     try:
         # Находим контейнер прокрутки ИМЕННО ленты сообщений (а не списка чатов слева,
         # у которого тот же класс scrollListScrollable). Идём вверх от messageWrapper.
-        for i in range(6):
-            scrolled = await page.evaluate("""() => {
-                // 1) контейнер, который реально содержит сообщения
-                const wrap = document.querySelector('[class*="messageWrapper"]');
-                let c = null;
-                if (wrap) {
-                    let p = wrap.parentElement;
-                    while (p && p !== document.body) {
-                        const oy = getComputedStyle(p).overflowY;
-                        if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight + 20) { c = p; break; }
-                        p = p.parentElement;
+        for i in range(5):
+            try:
+                await page.evaluate("""() => {
+                    // 1) контейнер, который реально содержит сообщения
+                    const wrap = document.querySelector('[class*="messageWrapper"]');
+                    let c = null;
+                    if (wrap) {
+                        let p = wrap.parentElement;
+                        while (p && p !== document.body) {
+                            const oy = getComputedStyle(p).overflowY;
+                            if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight + 20) { c = p; break; }
+                            p = p.parentElement;
+                        }
                     }
-                }
-                // 2) запасной вариант: последний скроллируемый список на странице
-                if (!c) {
-                    const lists = document.querySelectorAll('[class*="scrollListScrollable"], [class*="scrollList"]');
-                    c = lists.length ? lists[lists.length - 1] : null;
-                }
-                if (!c) return false;
-                const before = c.scrollTop;
-                // виртуальный список: плавно вверх + событие scroll, чтобы триггернуть догрузку
-                c.scrollTop = Math.max(0, c.scrollTop - 1200);
-                c.dispatchEvent(new Event('scroll', { bubbles: true }));
-                return { before, after: c.scrollTop, scrollHeight: c.scrollHeight };
-            }""")
+                    // 2) запасной вариант: последний скроллируемый список на странице
+                    if (!c) {
+                        const lists = document.querySelectorAll('[class*="scrollListScrollable"], [class*="scrollList"]');
+                        c = lists.length ? lists[lists.length - 1] : null;
+                    }
+                    if (!c) return false;
+                    // виртуальный список: плавно вверх + событие scroll, чтобы триггернуть догрузку
+                    c.scrollTop = Math.max(0, c.scrollTop - 1000);
+                    c.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    return true;
+                }""")
+            except Exception as e:
+                # одна неудачная прокрутка не должна валить весь запрос
+                log.debug(f"[{account}] load_older scroll step {i} error: {e}")
+                break
             await asyncio.sleep(0.5)  # ждём подгрузку виртуализированных сообщений
 
         # Парсим БЕЗ переоткрытия чата (иначе скролл сбросится)
-        return await parse_messages_in_dom(page)
+        try:
+            return await parse_messages_in_dom(page)
+        except Exception as e:
+            log.warning(f"[{account}] load_older parse error: {e}")
+            # вернём пусто вместо 500, чтобы фронт не показывал «краш»
+            return {"items": [], "total_found": 0}
     except HTTPException:
         raise
     except Exception as e:
