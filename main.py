@@ -391,13 +391,20 @@ _CLICK_CHAT_JS = """(name) => {
 
 async def find_and_click_chat(page, chat_name: str) -> bool:
     """Находит чат по имени в виртуализированном списке, при необходимости прокручивая его."""
-    # к началу списка
+    # сбрасываем строку поиска (иначе список отфильтрован и чат не найдётся) и к началу списка
     try:
         await page.evaluate("""() => {
+            document.querySelectorAll('input[placeholder*="Search"], input[placeholder*="Поиск"], input[class*="field"]').forEach(inp => {
+                if (inp.value) {
+                    inp.value = '';
+                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            });
             const c = document.querySelector('[class*="scrollListScrollable"]');
             if (c) c.scrollTop = 0;
         }""")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.4)
     except Exception:
         pass
 
@@ -984,34 +991,41 @@ async def api_send_message(account: str, chat_name: str, request: Request, user:
 
         await asyncio.sleep(1.2)
 
-        # Поле ввода. По реальному DOM: div.input--compact с contentEditable="inherit"
-        # — поэтому НЕ требуем атрибут [contenteditable].
-        input_selectors = [
-            '[class*="input--compact"]',
-            '[class*="input--secondary"]',
-            '[class*="input--neutral"]',
-            'div[contenteditable]',
-            '[contenteditable="true"]',
-            'textarea',
-        ]
-        input_found = False
-        for sel in input_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    await el.click()
-                    await asyncio.sleep(0.2)
-                    await page.keyboard.type(text, delay=20)
-                    input_found = True
-                    break
-            except Exception:
-                continue
+        # Находим ИМЕННО поле сообщения (composer), а не строку поиска чатов.
+        # Поиск — это <input> (placeholder Search), composer — contentEditable div.
+        focused = await page.evaluate("""() => {
+            const cands = Array.from(document.querySelectorAll('[class*="input--compact"], [contenteditable]'));
+            // composer: НЕ <input>, не внутри блока поиска; берём последний (он в футере диалога)
+            const composer = cands.reverse().find(e =>
+                e.tagName !== 'INPUT' &&
+                !/search|поиск/i.test((e.getAttribute('placeholder') || '')) &&
+                !e.closest('[class*="search"]')
+            );
+            if (!composer) return false;
+            composer.scrollIntoView({ block: 'center' });
+            composer.focus();
+            try {
+                const r = document.createRange(); r.selectNodeContents(composer); r.collapse(false);
+                const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+            } catch (e) {}
+            return true;
+        }""")
 
-        if not input_found:
+        if not focused:
             raise HTTPException(status_code=500, detail="Поле ввода сообщения не найдено")
 
+        await asyncio.sleep(0.2)
+        await page.keyboard.type(text, delay=15)
         await asyncio.sleep(0.3)
-        await page.keyboard.press("Enter")
+
+        # Отправка: пробуем кнопку отправки, иначе Enter
+        sent_via_btn = await page.evaluate("""() => {
+            const btn = document.querySelector('button[aria-label*="Отправ"], button[aria-label*="Send"], button[class*="send"], [class*="sendButton"]');
+            if (btn) { btn.click(); return true; }
+            return false;
+        }""")
+        if not sent_via_btn:
+            await page.keyboard.press("Enter")
         await asyncio.sleep(1)
 
         return {"ok": True}
@@ -1032,7 +1046,7 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
     try:
         # Находим контейнер прокрутки ИМЕННО ленты сообщений (а не списка чатов слева,
         # у которого тот же класс scrollListScrollable). Идём вверх от messageWrapper.
-        for i in range(5):
+        for i in range(3):
             try:
                 await page.evaluate("""() => {
                     // 1) контейнер, который реально содержит сообщения
@@ -1065,11 +1079,31 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
 
         # Парсим БЕЗ переоткрытия чата (иначе скролл сбросится)
         try:
-            return await parse_messages_in_dom(page)
+            result = await parse_messages_in_dom(page)
         except Exception as e:
             log.warning(f"[{account}] load_older parse error: {e}")
-            # вернём пусто вместо 500, чтобы фронт не показывал «краш»
-            return {"items": [], "total_found": 0}
+            result = {"items": [], "total_found": 0}
+
+        # Возвращаем ленту вниз — чтобы MAX выгрузил подгруженные сообщения из DOM
+        # и не копилась память (на маленьком инстансе это спасает от OOM-краша).
+        try:
+            await page.evaluate("""() => {
+                const wrap = document.querySelector('[class*="messageWrapper"]');
+                let c = null;
+                if (wrap) {
+                    let p = wrap.parentElement;
+                    while (p && p !== document.body) {
+                        const oy = getComputedStyle(p).overflowY;
+                        if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight + 20) { c = p; break; }
+                        p = p.parentElement;
+                    }
+                }
+                if (c) c.scrollTop = c.scrollHeight;
+            }""")
+        except Exception:
+            pass
+
+        return result
     except HTTPException:
         raise
     except Exception as e:
