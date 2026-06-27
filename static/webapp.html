@@ -1556,12 +1556,16 @@ function showDialogs() {
 
 // ============ АККАУНТЫ ============
 function renderAccount(a, i, onClick) {
+  const safeName = (a.name || '').replace(/'/g, "\\'");
+  // Во вкладке "Аккаунты" (onClick не передан) карточка ВСЁ РАВНО открывает чаты,
+  // если аккаунт активен — плюс остаются кнопки управления (пароль/удалить).
+  const cardClick = onClick || (a.active ? `openChats('${safeName}')` : '');
   const passwordBtn = (!onClick && a.active && !a.saved)
-    ? `<div class="item-action" style="color: var(--purple-bright);" onclick="event.stopPropagation(); retryPassword('${a.name}')" title="Ввести пароль">🔑</div>`
+    ? `<div class="item-action" style="color: var(--purple-bright);" onclick="event.stopPropagation(); retryPassword('${safeName}')" title="Ввести пароль">🔑</div>`
     : '';
   return `
     <div class="card list-item-wrap" style="animation-delay:${i * 60}ms;">
-      <div class="list-item" ${onClick ? `onclick="${onClick}"` : ''}>
+      <div class="list-item" ${cardClick ? `onclick="${cardClick}"` : ''} ${cardClick ? 'style="cursor:pointer;"' : ''}>
         <div class="avatar">${a.name[0].toUpperCase()}</div>
         <div class="item-content">
           <div class="item-title">${a.name}
@@ -1571,7 +1575,7 @@ function renderAccount(a, i, onClick) {
         </div>
         ${onClick
           ? '<div class="item-action">→</div>'
-          : `${passwordBtn}<div class="item-action" onclick="event.stopPropagation(); confirmDelete('${a.name}')">✕</div>`}
+          : `${passwordBtn}<div class="item-action" onclick="event.stopPropagation(); confirmDelete('${safeName}')">✕</div>`}
       </div>
     </div>
   `;
