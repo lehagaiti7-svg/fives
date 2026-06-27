@@ -226,8 +226,8 @@ MESSAGES_PARSER_JS = """() => {
                 }
                 if (!/messageWrapper/.test(cls)) return;
 
-                // Входящее/исходящее — по data-bubbles-variant (надёжно)
-                let isOut = false;
+                // Входящее/исходящее — по data-bubbles-variant, запасной признак: класс --isOut
+                let isOut = /--isOut/i.test(cls);
                 const variantEl = node.querySelector('[data-bubbles-variant]');
                 if (variantEl) isOut = variantEl.getAttribute('data-bubbles-variant') === 'outgoing';
                 const isFirst = /messageWrapper--first/.test(cls);
