@@ -259,20 +259,46 @@ MESSAGES_PARSER_JS = """() => {
                     if (tx && tx.length < 20 && /[0-9]{1,2}:[0-9]{2}/.test(tx)) { time = tx; break; }
                 }
 
-                // Реакции — берём из блока reactions внутри bubble, только с непустым счётчиком
+                // Реакции — только РЕАЛЬНЫЕ (с числовым счётчиком), не панель быстрых реакций
                 const reactions = [];
                 const reactionsContainer = node.querySelector('[class*="reactions"]');
-                if (reactionsContainer) {
-                    const reactionBtns = reactionsContainer.querySelectorAll('button[class*="reaction"]');
+                // Если блок реакций лежит внутри всплывающей панели/пикера — это не реальные реакции
+                const inPicker = reactionsContainer && reactionsContainer.closest(
+                    '[class*="picker"], [class*="Picker"], [class*="popup"], [class*="Popup"], [class*="menu"], [class*="Menu"], [class*="tooltip"], [class*="Tooltip"], [role="menu"], [role="dialog"]'
+                );
+                if (reactionsContainer && !inPicker) {
+                    const reactionBtns = reactionsContainer.querySelectorAll('button[class*="reaction"], [class*="reaction"][role="button"]');
                     reactionBtns.forEach(btn => {
                         const btnCls = typeof btn.className === 'string' ? btn.className : '';
+                        // сам контейнер-обёртку списка реакций пропускаем
                         if (/reactions/.test(btnCls)) return;
-                        const counterEl = btn.querySelector('[class*="counter"]');
-                        const count = counterEl ? (counterEl.innerText || '').trim() : '';
-                        // ПРОПУСКАЕМ реакции без счётчика — это панель быстрых реакций, а не реальные
-                        if (!count) return;
-                        const isActive = /reaction--active/i.test(btnCls);
-                        reactions.push({ emoji: '👍', count: count, active: isActive });
+
+                        // Счётчик: из явного элемента или первое число в кнопке
+                        const counterEl = btn.querySelector('[class*="counter"], [class*="count"], [class*="Count"]');
+                        let count = counterEl ? (counterEl.innerText || '').trim() : '';
+                        if (!count) {
+                            const m = (btn.innerText || '').match(/\\d+/);
+                            count = m ? m[0] : '';
+                        }
+                        // ПРОПУСКАЕМ реакции без числового счётчика — это панель быстрых реакций
+                        if (!/\\d/.test(count)) return;
+
+                        // Эмодзи: из <img alt>, кастомного эмодзи-элемента или текста кнопки
+                        let emoji = '';
+                        const imgEl = btn.querySelector('img');
+                        if (imgEl) emoji = (imgEl.alt || '').trim();
+                        if (!emoji) {
+                            const emojiEl = btn.querySelector('[class*="emoji"], [class*="Emoji"]');
+                            if (emojiEl) emoji = (emojiEl.innerText || '').trim();
+                        }
+                        if (!emoji) {
+                            // текст кнопки без цифр счётчика
+                            emoji = (btn.innerText || '').replace(/\\d+/g, '').trim();
+                        }
+                        if (!emoji) emoji = '👍';
+
+                        const isActive = /reaction--active|--active|isActive/i.test(btnCls);
+                        reactions.push({ emoji: emoji, count: count, active: isActive });
                     });
                 }
 
@@ -1019,11 +1045,26 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
     page: Page = sessions[account]["page"]
 
     try:
-        # Точный контейнер прокрутки (по дампу: scrollListScrollable)
+        # Находим контейнер прокрутки ИМЕННО ленты сообщений (а не списка чатов слева,
+        # у которого тот же класс scrollListScrollable). Идём вверх от messageWrapper.
         for i in range(8):
             scrolled = await page.evaluate("""() => {
-                const c = document.querySelector('[class*="scrollListScrollable"]')
-                       || document.querySelector('[class*="scrollList"]');
+                // 1) контейнер, который реально содержит сообщения
+                const wrap = document.querySelector('[class*="messageWrapper"]');
+                let c = null;
+                if (wrap) {
+                    let p = wrap.parentElement;
+                    while (p && p !== document.body) {
+                        const oy = getComputedStyle(p).overflowY;
+                        if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight + 20) { c = p; break; }
+                        p = p.parentElement;
+                    }
+                }
+                // 2) запасной вариант: последний скроллируемый список на странице
+                if (!c) {
+                    const lists = document.querySelectorAll('[class*="scrollListScrollable"], [class*="scrollList"]');
+                    c = lists.length ? lists[lists.length - 1] : null;
+                }
                 if (!c) return false;
                 const before = c.scrollTop;
                 c.scrollTop = 0;  // скроллим в самый верх → MAX подгружает старые
