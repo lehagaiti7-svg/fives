@@ -269,7 +269,9 @@ MESSAGES_PARSER_JS = """() => {
                     if (m) time = m[0].trim();
                 }
 
-                // Реакции: button.reaction → canvas(animoji) + span.counter
+                // Реакции: button.reaction + span.counter.
+                // Эмодзи рисуется на canvas (прочитать нельзя — cross-origin), поэтому
+                // пробуем alt/текст, иначе фолбэк 👍. БЕЗ base64 (это раздувало ответ).
                 const reactions = [];
                 const reactionsContainer = node.querySelector('[class*="reactions"]');
                 const inPicker = reactionsContainer && reactionsContainer.closest('[class*="picker"], [class*="popup"], [class*="menu"], [role="menu"], [role="dialog"]');
@@ -278,34 +280,21 @@ MESSAGES_PARSER_JS = """() => {
                         const counterEl = btn.querySelector('[class*="counter"]');
                         let count = counterEl ? (counterEl.innerText || '').trim() : '';
                         if (!/\\d/.test(count)) return;
-                        // эмодзи отрисован на canvas → снимаем как картинку
-                        let emojiImg = '';
-                        const canvas = btn.querySelector('canvas');
-                        if (canvas) { try { emojiImg = canvas.toDataURL('image/png'); } catch (e) {} }
                         let emoji = '';
-                        if (!emojiImg) {
-                            const imgEl = btn.querySelector('img');
-                            if (imgEl) emoji = (imgEl.alt || '').trim();
-                            if (!emoji) emoji = (btn.innerText || '').replace(/\\d+/g, '').trim();
-                        }
+                        const imgEl = btn.querySelector('img');
+                        if (imgEl) emoji = (imgEl.alt || '').trim();
+                        if (!emoji) emoji = (btn.innerText || '').replace(/\\d+/g, '').trim();
+                        if (!emoji) emoji = '👍';
                         const btnCls = typeof btn.className === 'string' ? btn.className : '';
-                        reactions.push({ emoji: emoji, emoji_img: emojiImg, count: count, active: /active/i.test(btnCls) });
+                        reactions.push({ emoji: emoji, count: count, active: /active/i.test(btnCls) });
                     });
                 }
 
-                // Аватар автора (img или canvas)
+                // Аватар автора — только настоящая картинка (canvas/letter-аватар → фолбэк инициал)
                 let authorAvatar = '';
                 if (!isOut) {
-                    const avEl = node.querySelector('[class*="avatar"]');
-                    if (avEl) {
-                        const avImg = avEl.querySelector('img');
-                        if (avImg && avImg.src && avImg.src.startsWith('http')) {
-                            authorAvatar = avImg.src;
-                        } else {
-                            const avCanvas = avEl.querySelector('canvas');
-                            if (avCanvas) { try { authorAvatar = avCanvas.toDataURL('image/png'); } catch (e) {} }
-                        }
-                    }
+                    const avImg = node.querySelector('[class*="avatar"] img, img[class*="avatar"]');
+                    if (avImg && avImg.src && avImg.src.startsWith('http')) authorAvatar = avImg.src;
                 }
 
                 // Голосовое
@@ -681,6 +670,17 @@ async def api_debug_dom(account: str):
             });
             result.relevantClasses = Array.from(classSet).slice(0, 50);
 
+            // Полный HTML первого элемента списка чатов (чтобы увидеть класс имени/превью/времени)
+            const listC = document.querySelector('.scrollListContent, [class*="scrollListContent"]');
+            if (listC) {
+                const firstItem = listC.querySelector(':scope > .item, :scope > [class*="item"]');
+                if (firstItem) result.chatItemHTML = firstItem.outerHTML.slice(0, 4000);
+            }
+
+            // Панель профиля (если открыта по тапу на шапку): пробуем правую панель/модалку
+            const prof = document.querySelector('[class*="profile"], [class*="Profile"], [class*="rightColumn"], [class*="userInfo"], [class*="contactInfo"], aside');
+            if (prof) result.profileHTML = prof.outerHTML.slice(0, 4000);
+
             return result;
         }""")
         return info
@@ -1025,7 +1025,7 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
     try:
         # Находим контейнер прокрутки ИМЕННО ленты сообщений (а не списка чатов слева,
         # у которого тот же класс scrollListScrollable). Идём вверх от messageWrapper.
-        for i in range(12):
+        for i in range(6):
             scrolled = await page.evaluate("""() => {
                 // 1) контейнер, который реально содержит сообщения
                 const wrap = document.querySelector('[class*="messageWrapper"]');
@@ -1050,7 +1050,7 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
                 c.dispatchEvent(new Event('scroll', { bubbles: true }));
                 return { before, after: c.scrollTop, scrollHeight: c.scrollHeight };
             }""")
-            await asyncio.sleep(0.8)  # ждём подгрузку виртуализированных сообщений
+            await asyncio.sleep(0.5)  # ждём подгрузку виртуализированных сообщений
 
         # Парсим БЕЗ переоткрытия чата (иначе скролл сбросится)
         return await parse_messages_in_dom(page)
