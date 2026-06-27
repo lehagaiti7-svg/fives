@@ -208,115 +208,41 @@ async def monitor_loop():
 # ================= CHATS LIST =================
 
 MESSAGES_PARSER_JS = """() => {
-            const container = document.querySelector('[class*="messagesList"], [class*="conversation"], [class*="messages-container"]') || document.body;
+            const wrappers = Array.from(document.querySelectorAll('[class*="messageWrapper"]'));
+            const container = (wrappers[0] && wrappers[0].closest('[class*="scrollListContent"]')) || document.body;
 
-            // Собираем все элементы (сообщения + разделители дат) в порядке появления
-            const allNodes = container.querySelectorAll('[class*="messageWrapper"], [class*="date"]:not([class*="messageDate"])');
+            // Сообщения + разделители дат (capsuleSeparator) в порядке появления
+            const allNodes = container.querySelectorAll('[class*="messageWrapper"], [class*="capsuleSeparator"]');
             const items = [];
 
             allNodes.forEach(node => {
                 const cls = typeof node.className === 'string' ? node.className : '';
 
-                // Если это разделитель даты (не внутри messageWrapper)
-                if (/date|day|divider|separator/i.test(cls) && !node.closest('[class*="messageWrapper"]')) {
+                // Разделитель даты
+                if (/capsuleSeparator/.test(cls)) {
                     const t = (node.innerText || '').trim();
-                    if (t && t.length < 30) {
-                        items.push({ type: 'date', text: t });
-                    }
+                    if (t && t.length < 40) items.push({ type: 'date', text: t });
                     return;
                 }
-
-                // Это messageWrapper
                 if (!/messageWrapper/.test(cls)) return;
 
-                const isOut = /isOut|--isOut/i.test(cls);
-                const isFirst = /--first/i.test(cls);
-                const isLast = /--last/i.test(cls);
+                // Входящее/исходящее — по data-bubbles-variant (надёжно)
+                let isOut = false;
+                const variantEl = node.querySelector('[data-bubbles-variant]');
+                if (variantEl) isOut = variantEl.getAttribute('data-bubbles-variant') === 'outgoing';
+                const isFirst = /messageWrapper--first/.test(cls);
+                const isLast = /messageWrapper--last/.test(cls);
 
-                // Имя автора
+                const bubbleContent = node.querySelector('[class*="bubbleContent"]')
+                    || node.querySelector('[class*="bubble"]') || node;
+
+                // Имя автора (шапка: .header .name .text)
                 let authorName = '';
-                const authorEl = node.querySelector('[class*="author"]:not([class*="authorAvatar"])');
-                if (authorEl) {
-                    const t = (authorEl.innerText || '').trim();
+                const headerEl = bubbleContent.querySelector('[class*="header"]');
+                if (headerEl) {
+                    const t = (headerEl.innerText || '').trim();
                     if (t && t.length < 100) authorName = t;
                 }
-
-                // Аватар автора
-                let authorAvatar = '';
-                const avatarImg = node.querySelector('[class*="authorAvatar"] img, img[class*="authorAvatar"]');
-                if (avatarImg && avatarImg.src && avatarImg.src.startsWith('http')) {
-                    authorAvatar = avatarImg.src;
-                }
-
-                // Пузырь
-                const bubble = node.querySelector('[class*="bubble"]') || node;
-
-                // Время
-                let time = '';
-                const timeEls = bubble.querySelectorAll('[class*="time"], [class*="Time"]');
-                for (const t of timeEls) {
-                    const tx = (t.innerText || '').trim();
-                    if (tx && tx.length < 20 && /[0-9]{1,2}:[0-9]{2}/.test(tx)) { time = tx; break; }
-                }
-
-                // Реакции — только РЕАЛЬНЫЕ (с числовым счётчиком), не панель быстрых реакций
-                const reactions = [];
-                const reactionsContainer = node.querySelector('[class*="reactions"]');
-                // Если блок реакций лежит внутри всплывающей панели/пикера — это не реальные реакции
-                const inPicker = reactionsContainer && reactionsContainer.closest(
-                    '[class*="picker"], [class*="Picker"], [class*="popup"], [class*="Popup"], [class*="menu"], [class*="Menu"], [class*="tooltip"], [class*="Tooltip"], [role="menu"], [role="dialog"]'
-                );
-                if (reactionsContainer && !inPicker) {
-                    const reactionBtns = reactionsContainer.querySelectorAll('button[class*="reaction"], [class*="reaction"][role="button"]');
-                    reactionBtns.forEach(btn => {
-                        const btnCls = typeof btn.className === 'string' ? btn.className : '';
-                        // сам контейнер-обёртку списка реакций пропускаем
-                        if (/reactions/.test(btnCls)) return;
-
-                        // Счётчик: из явного элемента или первое число в кнопке
-                        const counterEl = btn.querySelector('[class*="counter"], [class*="count"], [class*="Count"]');
-                        let count = counterEl ? (counterEl.innerText || '').trim() : '';
-                        if (!count) {
-                            const m = (btn.innerText || '').match(/\\d+/);
-                            count = m ? m[0] : '';
-                        }
-                        // ПРОПУСКАЕМ реакции без числового счётчика — это панель быстрых реакций
-                        if (!/\\d/.test(count)) return;
-
-                        // Эмодзи: из <img alt>, кастомного эмодзи-элемента или текста кнопки
-                        let emoji = '';
-                        const imgEl = btn.querySelector('img');
-                        if (imgEl) emoji = (imgEl.alt || '').trim();
-                        if (!emoji) {
-                            const emojiEl = btn.querySelector('[class*="emoji"], [class*="Emoji"]');
-                            if (emojiEl) emoji = (emojiEl.innerText || '').trim();
-                        }
-                        if (!emoji) {
-                            // текст кнопки без цифр счётчика
-                            emoji = (btn.innerText || '').replace(/\\d+/g, '').trim();
-                        }
-                        if (!emoji) emoji = '👍';
-
-                        const isActive = /reaction--active|--active|isActive/i.test(btnCls);
-                        reactions.push({ emoji: emoji, count: count, active: isActive });
-                    });
-                }
-
-                // Текст — ТОЛЬКО span.text (по дампу: <span class="text svelte-...">)
-                let text = '';
-                const textSpan = bubble.querySelector('[class*="text"]:not([class*="counter"])');
-                if (textSpan) {
-                    text = (textSpan.innerText || '').trim();
-                } else {
-                    // fallback: клон без реакций/времени/кнопок
-                    const clone = bubble.cloneNode(true);
-                    clone.querySelectorAll('[class*="reaction"], [class*="time"], [class*="Time"], button, canvas, [class*="counter"]').forEach(el => el.remove());
-                    text = (clone.innerText || '').trim();
-                }
-                if (authorName && text.startsWith(authorName)) {
-                    text = text.slice(authorName.length).trim();
-                }
-                if (time && text.endsWith(time)) text = text.slice(0, -time.length).trim();
 
                 // Пересланное
                 let forwardFrom = '';
@@ -326,35 +252,85 @@ MESSAGES_PARSER_JS = """() => {
                     if (t) forwardFrom = t.replace(/^Переслано:\\s*/i, '').trim();
                 }
 
+                // Текст сообщения: клон bubbleContent без шапки/меты/реакций/служебного
+                let text = '';
+                {
+                    const clone = bubbleContent.cloneNode(true);
+                    clone.querySelectorAll('[class*="header"], [class*="meta"], [class*="reactions"], [class*="reaction"], [class*="views"], [class*="counter"], canvas, svg, button').forEach(e => e.remove());
+                    text = (clone.innerText || '').trim();
+                }
+                if (authorName && text.startsWith(authorName)) text = text.slice(authorName.length).trim();
+
+                // Время — из меты ("3,9K 05:58 PM" или "05:58 PM")
+                let time = '';
+                const metaEl = bubbleContent.querySelector('[class*="meta"]');
+                if (metaEl) {
+                    const m = (metaEl.innerText || '').match(/\\d{1,2}:\\d{2}(\\s*[AP]M)?/i);
+                    if (m) time = m[0].trim();
+                }
+
+                // Реакции: button.reaction → canvas(animoji) + span.counter
+                const reactions = [];
+                const reactionsContainer = node.querySelector('[class*="reactions"]');
+                const inPicker = reactionsContainer && reactionsContainer.closest('[class*="picker"], [class*="popup"], [class*="menu"], [role="menu"], [role="dialog"]');
+                if (reactionsContainer && !inPicker) {
+                    reactionsContainer.querySelectorAll('button[class*="reaction"]').forEach(btn => {
+                        const counterEl = btn.querySelector('[class*="counter"]');
+                        let count = counterEl ? (counterEl.innerText || '').trim() : '';
+                        if (!/\\d/.test(count)) return;
+                        // эмодзи отрисован на canvas → снимаем как картинку
+                        let emojiImg = '';
+                        const canvas = btn.querySelector('canvas');
+                        if (canvas) { try { emojiImg = canvas.toDataURL('image/png'); } catch (e) {} }
+                        let emoji = '';
+                        if (!emojiImg) {
+                            const imgEl = btn.querySelector('img');
+                            if (imgEl) emoji = (imgEl.alt || '').trim();
+                            if (!emoji) emoji = (btn.innerText || '').replace(/\\d+/g, '').trim();
+                        }
+                        const btnCls = typeof btn.className === 'string' ? btn.className : '';
+                        reactions.push({ emoji: emoji, emoji_img: emojiImg, count: count, active: /active/i.test(btnCls) });
+                    });
+                }
+
+                // Аватар автора (img или canvas)
+                let authorAvatar = '';
+                if (!isOut) {
+                    const avEl = node.querySelector('[class*="avatar"]');
+                    if (avEl) {
+                        const avImg = avEl.querySelector('img');
+                        if (avImg && avImg.src && avImg.src.startsWith('http')) {
+                            authorAvatar = avImg.src;
+                        } else {
+                            const avCanvas = avEl.querySelector('canvas');
+                            if (avCanvas) { try { authorAvatar = avCanvas.toDataURL('image/png'); } catch (e) {} }
+                        }
+                    }
+                }
+
                 // Голосовое
                 let voiceUrl = '';
                 let voiceDuration = '';
                 const audioEl = node.querySelector('audio');
                 if (audioEl) {
                     voiceUrl = audioEl.src || '';
-                    if (!voiceUrl) {
-                        const src = audioEl.querySelector('source');
-                        if (src) voiceUrl = src.src;
-                    }
+                    if (!voiceUrl) { const src = audioEl.querySelector('source'); if (src) voiceUrl = src.src; }
                     const durEl = node.querySelector('[class*="duration"], [class*="Duration"]');
                     if (durEl) voiceDuration = (durEl.innerText || '').trim();
                 }
 
                 // Картинки/видео
                 const mediaUrls = [];
-                node.querySelectorAll('img:not([class*="avatar"]):not([class*="Avatar"]):not([class*="reaction"]):not([class*="emoji"])').forEach(img => {
-                    if (img.src && img.src.startsWith('http')) {
-                        if (img.naturalWidth >= 60 || img.width >= 60) {
-                            mediaUrls.push({ type: 'image', url: img.src });
-                        }
+                node.querySelectorAll('img').forEach(img => {
+                    const ic = typeof img.className === 'string' ? img.className : '';
+                    if (/avatar|reaction|emoji|animoji/i.test(ic)) return;
+                    if (img.src && img.src.startsWith('http') && (img.naturalWidth >= 60 || img.width >= 60)) {
+                        mediaUrls.push({ type: 'image', url: img.src });
                     }
                 });
                 node.querySelectorAll('video').forEach(v => {
                     let src = v.src;
-                    if (!src) {
-                        const s = v.querySelector('source');
-                        if (s) src = s.src;
-                    }
+                    if (!src) { const s = v.querySelector('source'); if (s) src = s.src; }
                     if (src && src.startsWith('http')) mediaUrls.push({ type: 'video', url: src });
                 });
 
@@ -1001,11 +977,13 @@ async def api_send_message(account: str, chat_name: str, request: Request, user:
 
         await asyncio.sleep(1.2)
 
-        # Ищем поле ввода сообщения (по дампу: div.input--compact[contenteditable])
+        # Поле ввода. По реальному DOM: div.input--compact с contentEditable="inherit"
+        # — поэтому НЕ требуем атрибут [contenteditable].
         input_selectors = [
-            '[class*="input--compact"][contenteditable]',
-            '[class*="input--secondary"][contenteditable]',
-            '[class*="input"][contenteditable="true"]',
+            '[class*="input--compact"]',
+            '[class*="input--secondary"]',
+            '[class*="input--neutral"]',
+            'div[contenteditable]',
             '[contenteditable="true"]',
             'textarea',
         ]
@@ -1047,7 +1025,7 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
     try:
         # Находим контейнер прокрутки ИМЕННО ленты сообщений (а не списка чатов слева,
         # у которого тот же класс scrollListScrollable). Идём вверх от messageWrapper.
-        for i in range(8):
+        for i in range(12):
             scrolled = await page.evaluate("""() => {
                 // 1) контейнер, который реально содержит сообщения
                 const wrap = document.querySelector('[class*="messageWrapper"]');
@@ -1067,10 +1045,12 @@ async def api_load_older(account: str, chat_name: str, user: dict = None):
                 }
                 if (!c) return false;
                 const before = c.scrollTop;
-                c.scrollTop = 0;  // скроллим в самый верх → MAX подгружает старые
+                // виртуальный список: плавно вверх + событие scroll, чтобы триггернуть догрузку
+                c.scrollTop = Math.max(0, c.scrollTop - 1200);
+                c.dispatchEvent(new Event('scroll', { bubbles: true }));
                 return { before, after: c.scrollTop, scrollHeight: c.scrollHeight };
             }""")
-            await asyncio.sleep(1.0)  # ждём подгрузку виртуализированных сообщений
+            await asyncio.sleep(0.8)  # ждём подгрузку виртуализированных сообщений
 
         # Парсим БЕЗ переоткрытия чата (иначе скролл сбросится)
         return await parse_messages_in_dom(page)

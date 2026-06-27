@@ -838,6 +838,8 @@
     border-color: var(--purple-bright);
   }
   .reaction-count { font-weight: 600; margin-left: 1px; }
+  .reaction-chip { display: inline-flex; align-items: center; gap: 3px; }
+  .reaction-emoji { width: 16px; height: 16px; object-fit: contain; display: block; }
 
   /* ============ COMPOSER (поле ввода сообщения) ============ */
   .composer {
@@ -1853,6 +1855,8 @@ function renderMessages(items) {
   }
 
   const proxyUrl = (url) => '/api/accounts/' + encodeURIComponent(currentChatAccount) + '/proxy?url=' + encodeURIComponent(url);
+  // data:-URL (например, эмодзи/аватар, снятые с canvas) отдаём напрямую, остальное — через прокси
+  const mediaSrc = (url) => (url && url.startsWith('data:')) ? url : proxyUrl(url);
 
   let prevOutgoing = null;
   let prevAuthor = null;
@@ -1885,7 +1889,7 @@ function renderMessages(items) {
     if (!m.outgoing) {
       if (showAvatar) {
         if (m.author_avatar) {
-          avatarHtml = `<div class="msg-avatar"><img src="${proxyUrl(m.author_avatar)}" onerror="this.parentElement.textContent='${escapeHtmlInline((m.author_name || '?')[0].toUpperCase())}'"></div>`;
+          avatarHtml = `<div class="msg-avatar"><img src="${mediaSrc(m.author_avatar)}" onerror="this.parentElement.textContent='${escapeHtmlInline((m.author_name || '?')[0].toUpperCase())}'"></div>`;
         } else {
           const initial = (m.author_name || currentChatName || '?')[0].toUpperCase();
           avatarHtml = `<div class="msg-avatar">${initial}</div>`;
@@ -1941,9 +1945,12 @@ function renderMessages(items) {
     // Реакции
     let reactionsHtml = '';
     if (m.reactions && m.reactions.length) {
-      reactionsHtml = '<div class="msg-reactions">' + m.reactions.map(r =>
-        `<div class="reaction-chip ${r.active ? 'active' : ''}">${escapeHtmlInline(r.emoji)}${r.count ? ` <span class="reaction-count">${escapeHtmlInline(String(r.count))}</span>` : ''}</div>`
-      ).join('') + '</div>';
+      reactionsHtml = '<div class="msg-reactions">' + m.reactions.map(r => {
+        const face = r.emoji_img
+          ? `<img class="reaction-emoji" src="${r.emoji_img}" alt="">`
+          : escapeHtmlInline(r.emoji || '·');
+        return `<div class="reaction-chip ${r.active ? 'active' : ''}">${face}${r.count ? ` <span class="reaction-count">${escapeHtmlInline(String(r.count))}</span>` : ''}</div>`;
+      }).join('') + '</div>';
     }
 
     const timeBlock = m.time ? `<div class="msg-time">${escapeHtmlInline(m.time)}</div>` : '';
